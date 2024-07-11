@@ -6,7 +6,7 @@
 from spack.package import *
 
 
-class Palace(CMakePackage):
+class Palace(CMakePackage, CudaPackage, ROCmPackage):
     """3D finite element solver for computational electromagnetics"""
 
     tags = ["cem", "fem", "finite-elements", "hpc", "solver"]
@@ -17,9 +17,12 @@ class Palace(CMakePackage):
     maintainers("sebastiangrimberg")
 
     version("develop", branch="main")
+    version("0.13.0", tag="v0.13.0", commit="a61c8cbe0cacf496cde3c62e93085fae0d6299ac")
     version("0.12.0", tag="v0.12.0", commit="8c192071206466638d5818048ee712e1fada386f")
     version("0.11.2", tag="v0.11.2", commit="6c3aa5f84a934a6ddd58022b2945a1bdb5fa329d")
 
+    # Note: 'cuda' and 'cuda_arch' variants are added by the CudaPackage
+    # Note: 'rocm' and 'amdgpu_target' variants are added by the ROCmPackage
     variant("shared", default=True, description="Build shared libraries")
     variant("int64", default=False, description="Use 64 bit integers")
     variant("openmp", default=False, description="Use OpenMP for shared-memory parallelism")
@@ -99,7 +102,7 @@ class Palace(CMakePackage):
         depends_on("arpack-ng~shared", when="~shared")
 
     with when("+libxsmm"):
-        depends_on("libxsmm@main")
+        depends_on("libxsmm@=main")  # LIBXSMM has a older main-DATE version
         depends_on("libxsmm+shared", when="+shared")
         depends_on("libxsmm~shared", when="~shared")
 
@@ -107,6 +110,25 @@ class Palace(CMakePackage):
         depends_on("magma")
         depends_on("magma+shared", when="+shared")
         depends_on("magma~shared", when="~shared")
+
+    # Propagate CUDA architectures/AMD GPU targets down to dependencies (concretization
+    # fails if we try to use == to propagate)
+    with when("+cuda"):
+        for arch in CudaPackage.cuda_arch_values:
+            cuda_variant = f"+cuda cuda_arch={arch}"
+            depends_on(f"hypre{cuda_variant}", when=f"{cuda_variant}")
+            depends_on(f"superlu-dist{cuda_variant}", when=f"+superlu-dist{cuda_variant}")
+            depends_on(f"strumpack{cuda_variant}", when=f"+strumpack{cuda_variant}")
+            depends_on(f"slepc{cuda_variant} ^petsc{cuda_variant}", when=f"+slepc{cuda_variant}")
+            depends_on(f"magma{cuda_variant}", when=f"+magma{cuda_variant}")
+    with when("+rocm"):
+        for arch in ROCmPackage.amdgpu_targets:
+            rocm_variant = f"+rocm amdgpu_target={arch}"
+            depends_on(f"hypre{rocm_variant}", when=f"{rocm_variant}")
+            depends_on(f"superlu-dist{rocm_variant}", when=f"+superlu-dist{rocm_variant}")
+            depends_on(f"strumpack{rocm_variant}", when=f"+strumpack{rocm_variant}")
+            depends_on(f"slepc{rocm_variant} ^petsc{rocm_variant}", when=f"+slepc{rocm_variant}")
+            depends_on(f"magma{rocm_variant}", when=f"+magma{rocm_variant}")
 
     # Palace always builds its own internal MFEM, libCEED, and GSLIB
     conflicts("mfem")
@@ -117,6 +139,7 @@ class Palace(CMakePackage):
     conflicts("^hypre+int64", msg="Palace uses HYPRE's mixedint option for 64 bit integers")
     conflicts("^mumps+int64", msg="Palace requires MUMPS without 64 bit integers")
     conflicts("^slepc+arpack", msg="Palace requires SLEPc without ARPACK")
+    conflicts("+cuda+rocm", msg="PALACE_WITH_CUDA is not compatible with PALACE_WITH_HIP")
 
     def cmake_args(self):
         args = [
@@ -133,6 +156,24 @@ class Palace(CMakePackage):
             self.define_from_variant("PALACE_WITH_GSLIB", "gslib"),
             self.define("PALACE_BUILD_EXTERNAL_DEPS", False),
         ]
+
+        # Handle GPU builds
+        args += [
+            self.define_from_variant("PALACE_WITH_CUDA", "cuda"),
+            self.define_from_variant("PALACE_WITH_HIP", "rocm"),
+        ]
+        if "+cuda" in self.spec and not "none" in self.spec.variants["cuda_arch"].value:
+            args += [
+                self.define(
+                    "CMAKE_CUDA_ARCHITECTURES", ";".join(self.spec.variants["cuda_arch"].value)
+                )
+            ]
+        if "+rocm" in self.spec and not "none" in self.spec.variants["amdgpu_target"].value:
+            args += [
+                self.define(
+                    "CMAKE_HIP_ARCHITECTURES", ";".join(self.spec.variants["amdgpu_target"].value)
+                )
+            ]
 
         # HYPRE is always built with external BLAS/LAPACK
         args += [
